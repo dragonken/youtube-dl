@@ -170,6 +170,7 @@ class BiliBiliIE(InfoExtractor):
             payload = 'appkey=%s&cid=%s&otype=json&%s' % (self._APP_KEY, cid, rendition)
             sign = hashlib.md5((payload + self._BILIBILI_KEY).encode('utf-8')).hexdigest()
 
+            video_id = cid
             video_info = self._download_json(
                 'http://interface.bilibili.com/v2/playurl?%s&sign=%s' % (payload, sign),
                 video_id, note='Downloading video info page',
