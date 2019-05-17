@@ -44,6 +44,7 @@ from ..utils import (
     compiled_regex_type,
     determine_ext,
     determine_protocol,
+    dict_get,
     error_to_compat_str,
     ExtractorError,
     extract_attributes,
@@ -56,13 +57,16 @@ from ..utils import (
     JSON_LD_RE,
     mimetype2ext,
     orderedSet,
+    parse_bitrate,
     parse_codecs,
     parse_duration,
     parse_iso8601,
     parse_m3u8_attributes,
+    parse_resolution,
     RegexNotFoundError,
     sanitized_Request,
     sanitize_filename,
+    str_or_none,
     unescapeHTML,
     unified_strdate,
     unified_timestamp,
@@ -113,7 +117,7 @@ class InfoExtractor(object):
                                        unfragmented media)
                                      - URL of the MPD manifest or base URL
                                        representing the media if MPD manifest
-                                       is parsed froma string (in case of
+                                       is parsed from a string (in case of
                                        fragmented media)
                                    for MSS - URL of the ISM manifest.
                     * manifest_url
@@ -538,11 +542,11 @@ class InfoExtractor(object):
             raise ExtractorError('An extractor error has occurred.', cause=e)
 
     def __maybe_fake_ip_and_retry(self, countries):
-        if (not self._downloader.params.get('geo_bypass_country', None) and
-                self._GEO_BYPASS and
-                self._downloader.params.get('geo_bypass', True) and
-                not self._x_forwarded_for_ip and
-                countries):
+        if (not self._downloader.params.get('geo_bypass_country', None)
+                and self._GEO_BYPASS
+                and self._downloader.params.get('geo_bypass', True)
+                and not self._x_forwarded_for_ip
+                and countries):
             country_code = random.choice(countries)
             self._x_forwarded_for_ip = GeoUtils.random_ipv4(country_code)
             if self._x_forwarded_for_ip:
@@ -678,8 +682,8 @@ class InfoExtractor(object):
 
     def __check_blocked(self, content):
         first_block = content[:512]
-        if ('<title>Access to this site is blocked</title>' in content and
-                'Websense' in first_block):
+        if ('<title>Access to this site is blocked</title>' in content
+                and 'Websense' in first_block):
             msg = 'Access to this webpage has been blocked by Websense filtering software in your network.'
             blocked_iframe = self._html_search_regex(
                 r'<iframe src="([^"]+)"', content,
@@ -697,8 +701,8 @@ class InfoExtractor(object):
             if block_msg:
                 msg += ' (Message: "%s")' % block_msg.replace('\n', ' ')
             raise ExtractorError(msg, expected=True)
-        if ('<title>TTK :: Доступ к ресурсу ограничен</title>' in content and
-                'blocklist.rkn.gov.ru' in content):
+        if ('<title>TTK :: Доступ к ресурсу ограничен</title>' in content
+                and 'blocklist.rkn.gov.ru' in content):
             raise ExtractorError(
                 'Access to this webpage has been blocked by decision of the Russian government. '
                 'Visit http://blocklist.rkn.gov.ru/ for a block reason.',
@@ -1705,8 +1709,8 @@ class InfoExtractor(object):
                 continue
             else:
                 tbr = float_or_none(
-                    last_stream_inf.get('AVERAGE-BANDWIDTH') or
-                    last_stream_inf.get('BANDWIDTH'), scale=1000)
+                    last_stream_inf.get('AVERAGE-BANDWIDTH')
+                    or last_stream_inf.get('BANDWIDTH'), scale=1000)
                 format_id = []
                 if m3u8_id:
                     format_id.append(m3u8_id)
@@ -2015,6 +2019,8 @@ class InfoExtractor(object):
         if res is False:
             return []
         mpd_doc, urlh = res
+        if mpd_doc is None:
+            return []
         mpd_base_url = base_url(urlh.geturl())
 
         return self._parse_mpd_formats(
@@ -2481,18 +2487,43 @@ class InfoExtractor(object):
             media_info['thumbnail'] = absolute_url(media_attributes.get('poster'))
             if media_content:
                 for source_tag in re.findall(r'<source[^>]+>', media_content):
-                    source_attributes = extract_attributes(source_tag)
-                    src = source_attributes.get('src')
+                    s_attr = extract_attributes(source_tag)
+                    # data-video-src and data-src are non standard but seen
+                    # several times in the wild
+                    src = dict_get(s_attr, ('src', 'data-video-src', 'data-src'))
                     if not src:
                         continue
-                    f = parse_content_type(source_attributes.get('type'))
+                    f = parse_content_type(s_attr.get('type'))
                     is_plain_url, formats = _media_formats(src, media_type, f)
                     if is_plain_url:
-                        # res attribute is not standard but seen several times
-                        # in the wild
+                        # width, height, res, label and title attributes are
+                        # all not standard but seen several times in the wild
+                        labels = [
+                            s_attr.get(lbl)
+                            for lbl in ('label', 'title')
+                            if str_or_none(s_attr.get(lbl))
+                        ]
+                        width = int_or_none(s_attr.get('width'))
+                        height = (int_or_none(s_attr.get('height'))
+                                  or int_or_none(s_attr.get('res')))
+                        if not width or not height:
+                            for lbl in labels:
+                                resolution = parse_resolution(lbl)
+                                if not resolution:
+                                    continue
+                                width = width or resolution.get('width')
+                                height = height or resolution.get('height')
+                        for lbl in labels:
+                            tbr = parse_bitrate(lbl)
+                            if tbr:
+                                break
+                        else:
+                            tbr = None
                         f.update({
-                            'height': int_or_none(source_attributes.get('res')),
-                            'format_id': source_attributes.get('label'),
+                            'width': width,
+                            'height': height,
+                            'tbr': tbr,
+                            'format_id': s_attr.get('label') or s_attr.get('title'),
                         })
                         f.update(formats[0])
                         media_info['formats'].append(f)
@@ -2816,8 +2847,8 @@ class InfoExtractor(object):
         return not any_restricted
 
     def extract_subtitles(self, *args, **kwargs):
-        if (self._downloader.params.get('writesubtitles', False) or
-                self._downloader.params.get('listsubtitles')):
+        if (self._downloader.params.get('writesubtitles', False)
+                or self._downloader.params.get('listsubtitles')):
             return self._get_subtitles(*args, **kwargs)
         return {}
 
@@ -2842,8 +2873,8 @@ class InfoExtractor(object):
         return ret
 
     def extract_automatic_captions(self, *args, **kwargs):
-        if (self._downloader.params.get('writeautomaticsub', False) or
-                self._downloader.params.get('listsubtitles')):
+        if (self._downloader.params.get('writeautomaticsub', False)
+                or self._downloader.params.get('listsubtitles')):
             return self._get_automatic_captions(*args, **kwargs)
         return {}
 
@@ -2851,9 +2882,9 @@ class InfoExtractor(object):
         raise NotImplementedError('This method must be implemented by subclasses')
 
     def mark_watched(self, *args, **kwargs):
-        if (self._downloader.params.get('mark_watched', False) and
-                (self._get_login_info()[0] is not None or
-                    self._downloader.params.get('cookiefile') is not None)):
+        if (self._downloader.params.get('mark_watched', False)
+                and (self._get_login_info()[0] is not None
+                     or self._downloader.params.get('cookiefile') is not None)):
             self._mark_watched(*args, **kwargs)
 
     def _mark_watched(self, *args, **kwargs):
